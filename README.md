@@ -15,10 +15,18 @@ This project provides an automatic Beat Saber map generator that converts audio 
 - FFmpeg (required for audio processing)
 
 ## Installation
+### Easy Method
 1. Clone this repository:
    ```sh
    git clone https://github.com/SUP3RMASS1VE/Beat-Saber-Auto-Mapper.git
-   cd beat-saber-mapper
+   ```
+2. Run `run.bat` to set up everything automatically.
+
+### Manual Method
+1. Clone this repository:
+   ```sh
+   git clone https://github.com/SUP3RMASS1VE/Beat-Saber-Auto-Mapper.git
+   cd Beat-Saber-Auto-Mapper
    ```
 2. Install dependencies:
    ```sh
