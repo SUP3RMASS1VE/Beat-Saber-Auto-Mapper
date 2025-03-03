@@ -877,7 +877,7 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
                         </div>
                         
                         <div style="text-align:center; margin-bottom:20px;">
-                            <img src="https://i.imgur.com/zTvIZ9c.png" alt="Beat Saber Logo" style="max-width:200px; margin:0 auto;" />
+                            
                         </div>
                         """)
                         audio_output = gr.File(label="Download Your Maps")
