@@ -150,12 +150,23 @@ def process_audio_file(audio_file, difficulties_arg, progress=gr.Progress()):
         update_progress(0.1, "Julia not found. Installing Julia...")
         JULIA_PATH = ensure_julia_installation(progress)
         if not JULIA_PATH:
-            return gr.update(value=None, visible=True, label="Error: Failed to install Julia")
+            return gr.update(value="Error: Failed to install Julia", visible=True)
     
     # Generate a unique ID for this job
     job_id = str(uuid.uuid4())
     output_folder = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(output_folder, exist_ok=True)
+    
+    # Create a log file for this job
+    log_file = os.path.join(output_folder, "process_log.txt")
+    
+    # Function to log messages both to console and log file
+    def log_message(message):
+        print(message)
+        with open(log_file, "a") as f:
+            f.write(message + "\n")
+    
+    log_message(f"Starting job {job_id}")
     
     # Handle both string paths and file objects
     if isinstance(audio_file, str):
@@ -167,53 +178,111 @@ def process_audio_file(audio_file, difficulties_arg, progress=gr.Progress()):
         file_name = os.path.basename(file_path)
     
     song_name = os.path.splitext(file_name)[0]
+    log_message(f"Processing song: {song_name}")
     
     # Copy the file to our temp directory
     temp_file_path = os.path.join(TEMP_DIR, file_name)
     shutil.copy(file_path, temp_file_path)
     
     update_progress(0.1, "Audio file uploaded")
+    log_message("Audio file uploaded to temp directory")
     
     try:
         # Run the Julia script to process the audio file
         update_progress(0.2, "Starting Beat Saber map generation")
-        cmd = [JULIA_PATH, "src/mapsongs.jl", temp_file_path, difficulties_arg]
+        
+        # Create a temporary file to store the difficulties
+        difficulties_file = os.path.join(TEMP_DIR, f"{job_id}_difficulties.txt")
+        with open(difficulties_file, "w") as f:
+            f.write(difficulties_arg)
+        
+        # Get the ffmpeg path
+        ffmpeg_path = None
+        if FFMPEG_FOUND:
+            ffmpeg_path = "ffmpeg"  # It's in the PATH
+        else:
+            # Check if ffmpeg is in the ffmpeg directory (directly, not in bin)
+            ffmpeg_dir = os.path.join(os.getcwd(), "ffmpeg")
+            if os.path.exists(ffmpeg_dir):
+                # First check if ffmpeg.exe is directly in the ffmpeg folder
+                ffmpeg_exe = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+                if os.path.exists(ffmpeg_exe):
+                    ffmpeg_path = ffmpeg_exe
+                    print(f"Found FFmpeg at: {ffmpeg_path}")
+                # Also check bin subfolder as fallback
+                elif os.path.exists(os.path.join(ffmpeg_dir, "bin")):
+                    ffmpeg_exe = os.path.join(ffmpeg_dir, "bin", "ffmpeg.exe")
+                    if os.path.exists(ffmpeg_exe):
+                        ffmpeg_path = ffmpeg_exe
+                        print(f"Found FFmpeg at: {ffmpeg_path}")
+        
+        if not ffmpeg_path:
+            return "Error: ffmpeg not found. Please install ffmpeg."
+        
+        # Create a config file to pass additional parameters
+        config_file = os.path.join(TEMP_DIR, f"{job_id}_config.txt")
+        with open(config_file, "w") as f:
+            f.write(f"ffmpeg_path={ffmpeg_path}\n")
+        
+        # Pass the difficulties file path and config file path
+        cmd = [JULIA_PATH, "src/mapsongs.jl", temp_file_path, difficulties_file, config_file]
+        log_message(f"Executing command: {' '.join(cmd)}")
+        
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         
         if process.returncode != 0:
-            error_msg = stderr.decode('utf-8')
-            print(f"Error: {error_msg}")
+            error_msg = stderr.decode('utf-8', errors='replace')
+            log_message(f"Error: Process returned non-zero exit code {process.returncode}")
             
-            # Check if the error is about missing packages
-            if "Package WAV not found" in error_msg:
-                # Create an error log file instead of returning a string
-                error_file = os.path.join(output_folder, "error_log.txt")
-                with open(error_file, "w") as f:
-                    f.write(f"Error processing file: {error_msg}\n\n")
-                    f.write("The WAV package is missing. Please install it by running:\n")
-                    f.write("1. Click on the 'Julia Installation' tab\n")
-                    f.write("2. Click on 'Set up Julia Packages' button\n")
-                    f.write("3. Try processing your audio file again\n")
+            # Log the error details to the log file
+            log_message("===== ERROR DETAILS =====")
+            log_message(f"Error message: {error_msg[:1000]}..." if len(error_msg) > 1000 else f"Error message: {error_msg}")
+            log_message("===== STDOUT =====")
+            stdout_content = stdout.decode('utf-8', errors='replace')
+            log_message(stdout_content[:1000] + "..." if len(stdout_content) > 1000 else stdout_content)
+            
+            # Add helpful suggestions based on the error
+            log_message("===== TROUBLESHOOTING =====")
+            if "no such file or directory" in error_msg and "ffmpeg" in error_msg:
+                log_message("Possible FFmpeg issue detected:")
+                log_message(f"Current FFmpeg path: {ffmpeg_path}")
                 
-                return error_file
-            else:
-                # Create a generic error log file
-                error_file = os.path.join(output_folder, "error_log.txt")
-                with open(error_file, "w") as f:
-                    f.write(f"Error processing file: {error_msg}")
+                # Check for FFmpeg in common locations
+                log_message("Checking for FFmpeg in common locations:")
+                possible_paths = [
+                    os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
+                    os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe")
+                ]
                 
-                return error_file
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        log_message(f"Found FFmpeg at: {path}")
+            elif "adelay" in error_msg:
+                log_message("Possible issue with FFmpeg adelay filter")
+            elif "WAV" in error_msg and "not found" in error_msg:
+                log_message("Julia WAV package may be missing")
+            
+            # Return a simple error message to avoid HTTP issues
+            return gr.update(
+                value=f"Error processing file. See log file for details: {os.path.basename(log_file)}",
+                visible=True
+            )
         
         update_progress(0.7, "Maps generated, preparing download")
         
         # Find the generated folder (it has a random prefix)
         generated_folders = [f for f in os.listdir() if f.endswith("_" + song_name) and os.path.isdir(f)]
         if not generated_folders:
-            error_file = os.path.join(output_folder, "error_log.txt")
-            with open(error_file, "w") as f:
-                f.write("Error: Could not find generated map folder")
-            return error_file
+            log_message("Error: Could not find generated map folder")
+            log_message(f"Looking for folders ending with: _{song_name}")
+            log_message(f"Current directory: {os.getcwd()}")
+            log_message(f"Files in current directory: {', '.join(os.listdir()[:20])}")  # Limit to first 20 files
+            
+            return gr.update(
+                value=f"Error: Could not find generated map folder. See log file for details: {os.path.basename(log_file)}",
+                visible=True
+            )
         
         generated_folder = generated_folders[0]
         
@@ -239,12 +308,20 @@ def process_audio_file(audio_file, difficulties_arg, progress=gr.Progress()):
         return zip_path
     
     except Exception as e:
-        print(f"Error: {str(e)}")
-        # Create an error log file
-        error_file = os.path.join(output_folder, "error_log.txt")
-        with open(error_file, "w") as f:
-            f.write(f"Error: {str(e)}")
-        return error_file
+        error_message = str(e)
+        log_message(f"Unexpected error: {error_message}")
+        log_message(f"Exception type: {type(e).__name__}")
+        
+        # Log the traceback
+        import traceback
+        tb = traceback.format_exc()
+        log_message("===== TRACEBACK =====")
+        log_message(tb)
+        
+        return gr.update(
+            value=f"Error processing file. See log file for details: {os.path.basename(log_file)}",
+            visible=True
+        )
     finally:
         # Clean up the temp file
         if os.path.exists(temp_file_path):
@@ -305,7 +382,7 @@ check_and_setup_environment()
 beat_saber_colors = {
     "primary_hue": "blue",
     "secondary_hue": "red",
-    "neutral_hue": "slate",
+    "neutral_hue": "gray",  # Changed from slate to gray for darker tones
     "spacing_size": gr.themes.sizes.spacing_md,
     "radius_size": gr.themes.sizes.radius_md,
     "text_size": gr.themes.sizes.text_md,
@@ -328,30 +405,54 @@ beat_saber_theme = gr.themes.Soft(
 beat_saber_css = """
 :root {
     --bs-blue: #0078ff;
+    --bs-light-blue: #00aaff;
     --bs-red: #ff3355;
-    --bs-background: #191919;
-    --bs-accent: #454545;
+    --bs-background: #090a1a;
+    --bs-accent: #1a1b2e;
     --bs-text: #ffffff;
+    --bs-glow-blue: 0 0 10px rgba(0, 170, 255, 0.7);
+    --bs-glow-red: 0 0 10px rgba(255, 51, 85, 0.7);
 }
 
 body, .gradio-container {
     background-color: var(--bs-background) !important;
     color: var(--bs-text) !important;
+    background-image: 
+        radial-gradient(circle at 20% 30%, rgba(0, 120, 255, 0.1) 0%, transparent 40%),
+        radial-gradient(circle at 80% 70%, rgba(255, 51, 85, 0.1) 0%, transparent 40%);
 }
 
 .main-header {
     text-align: center;
     margin-bottom: 1.5rem;
     text-transform: uppercase;
-    letter-spacing: 2px;
-    background: linear-gradient(90deg, #0095ff, #ff4f6e);
+    letter-spacing: 3px;
+    background: linear-gradient(90deg, var(--bs-light-blue), var(--bs-red));
     -webkit-background-clip: text;
-    -webkit-text-fill-color: rgba(255, 255, 255, 0.9);
+    -webkit-text-fill-color: transparent;
     font-weight: 800;
-    font-size: 2.5rem;
+    font-size: 3rem;
     padding: 20px;
-    text-shadow: 0 0 5px rgba(0, 120, 255, 0.8), 0 0 10px rgba(255, 51, 85, 0.6);
-    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.3);
+    text-shadow: var(--bs-glow-blue), var(--bs-glow-red);
+    position: relative;
+}
+
+.main-header::before, .main-header::after {
+    content: '';
+    position: absolute;
+    width: 120px;
+    height: 3px;
+    background: linear-gradient(90deg, var(--bs-light-blue), var(--bs-red));
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.main-header::before {
+    top: 5px;
+}
+
+.main-header::after {
+    bottom: 5px;
 }
 
 .subtitle {
@@ -359,6 +460,13 @@ body, .gradio-container {
     margin-bottom: 2rem;
     font-size: 1.2rem;
     color: #cccccc !important;
+    font-weight: 300;
+    letter-spacing: 1px;
+}
+
+.tab-nav {
+    background-color: transparent !important;
+    border: none !important;
 }
 
 .tab-nav button {
@@ -369,12 +477,38 @@ body, .gradio-container {
     margin: 0 5px !important;
     padding: 10px 20px !important;
     transition: all 0.3s ease !important;
+    position: relative;
+    overflow: hidden;
+    z-index: 1;
+}
+
+.tab-nav button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, var(--bs-light-blue), var(--bs-red), transparent);
+    transition: all 0.4s ease;
+    z-index: -1;
+    opacity: 0.7;
+}
+
+.tab-nav button:hover::before {
+    left: 0;
 }
 
 .tab-nav button.selected {
-    background: linear-gradient(90deg, var(--bs-blue), var(--bs-red)) !important;
+    background: var(--bs-accent) !important;
     transform: translateY(-3px) !important;
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3) !important;
+    box-shadow: var(--bs-glow-blue), var(--bs-glow-red) !important;
+    color: white !important;
+    font-weight: bold !important;
+}
+
+.tab-nav button.selected::before {
+    left: 0;
 }
 
 button.primary {
@@ -385,6 +519,22 @@ button.primary {
     transition: all 0.3s ease !important;
     text-transform: uppercase !important;
     letter-spacing: 1px !important;
+    position: relative;
+    overflow: hidden;
+    z-index: 1;
+}
+
+button.primary::after {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: linear-gradient(45deg, transparent, rgba(255,255,255,0.2), transparent);
+    transform: rotate(45deg);
+    transition: all 0.6s ease;
+    z-index: -1;
 }
 
 button.primary:hover {
@@ -392,37 +542,64 @@ button.primary:hover {
     box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3) !important;
 }
 
+button.primary:hover::after {
+    left: 100%;
+}
+
 .difficulty-checkbox label {
     font-weight: bold !important;
     font-size: 1rem !important;
+    transition: all 0.3s ease !important;
+}
+
+.difficulty-checkbox:hover {
+    transform: translateY(-2px);
 }
 
 .easy-label span {
     color: #3CB371 !important;
+    text-shadow: 0 0 5px rgba(60, 179, 113, 0.5) !important;
 }
 
 .normal-label span {
     color: #1E90FF !important;
+    text-shadow: 0 0 5px rgba(30, 144, 255, 0.5) !important;
 }
 
 .hard-label span {
     color: #FFD700 !important;
+    text-shadow: 0 0 5px rgba(255, 215, 0, 0.5) !important;
 }
 
 .expert-label span {
     color: #FF4500 !important;
+    text-shadow: 0 0 5px rgba(255, 69, 0, 0.5) !important;
 }
 
 .expert-plus-label span {
     color: #9370DB !important;
+    text-shadow: 0 0 5px rgba(147, 112, 219, 0.5) !important;
 }
 
 .panel {
     border-radius: 10px !important;
     background-color: var(--bs-accent) !important;
     padding: 20px !important;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1) !important;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3) !important;
     margin-bottom: 20px !important;
+    border: 1px solid rgba(0, 170, 255, 0.2) !important;
+    position: relative;
+    overflow: hidden;
+}
+
+.panel::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, var(--bs-light-blue), var(--bs-red));
 }
 
 .status-message {
@@ -435,16 +612,19 @@ button.primary:hover {
 .status-success {
     background-color: rgba(76, 175, 80, 0.2) !important;
     color: #4CAF50 !important;
+    border-left: 3px solid #4CAF50 !important;
 }
 
 .status-warning {
     background-color: rgba(255, 152, 0, 0.2) !important;
     color: #FF9800 !important;
+    border-left: 3px solid #FF9800 !important;
 }
 
 .status-error {
     background-color: rgba(244, 67, 54, 0.2) !important;
     color: #F44336 !important;
+    border-left: 3px solid #F44336 !important;
 }
 
 /* Custom file upload */
@@ -454,17 +634,19 @@ button.primary:hover {
     padding: 20px !important;
     text-align: center !important;
     transition: all 0.3s ease !important;
+    background-color: rgba(0, 120, 255, 0.05) !important;
 }
 
 .file-upload:hover {
     border-color: var(--bs-red) !important;
     background-color: rgba(255, 51, 85, 0.05) !important;
+    box-shadow: var(--bs-glow-blue), var(--bs-glow-red) !important;
 }
 
 /* Custom loader animation */
 @keyframes beat {
-    0%, 100% { transform: scale(1); }
-    50% { transform: scale(1.1); }
+    0%, 100% { transform: scale(1); opacity: 0.8; }
+    50% { transform: scale(1.2); opacity: 1; }
 }
 
 .loader-container {
@@ -480,10 +662,11 @@ button.primary:hover {
     border-radius: 50% !important;
     margin: 0 5px !important;
     animation: beat 1s infinite !important;
+    box-shadow: 0 0 10px currentColor !important;
 }
 
 .beat-loader:nth-child(1) {
-    background-color: var(--bs-blue) !important;
+    background-color: var(--bs-light-blue) !important;
     animation-delay: 0s !important;
 }
 
@@ -493,13 +676,108 @@ button.primary:hover {
 }
 
 .beat-loader:nth-child(3) {
-    background-color: var(--bs-blue) !important;
+    background-color: var(--bs-light-blue) !important;
     animation-delay: 0.4s !important;
 }
 
 .beat-loader:nth-child(4) {
     background-color: var(--bs-red) !important;
     animation-delay: 0.6s !important;
+}
+
+/* Beat Saber cube styling */
+.beat-cube {
+    position: relative;
+    width: 50px;
+    height: 50px;
+    margin: 15px auto;
+    transform-style: preserve-3d;
+    animation: rotate 10s infinite linear;
+}
+
+@keyframes rotate {
+    0% { transform: rotateX(-20deg) rotateY(0deg); }
+    100% { transform: rotateX(-20deg) rotateY(360deg); }
+}
+
+.cube-face {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 170, 255, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 0 10px rgba(0, 170, 255, 0.5);
+}
+
+.face-front { transform: translateZ(25px); }
+.face-back { transform: translateZ(-25px) rotateY(180deg); }
+.face-left { transform: translateX(-25px) rotateY(-90deg); }
+.face-right { transform: translateX(25px) rotateY(90deg); }
+.face-top { transform: translateY(-25px) rotateX(90deg); }
+.face-bottom { transform: translateY(25px) rotateX(-90deg); }
+
+.face-front::after, .face-back::after, .face-left::after, .face-right::after, .face-top::after, .face-bottom::after {
+    content: '';
+    position: absolute;
+    width: 80%;
+    height: 80%;
+    top: 10%;
+    left: 10%;
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Red cube for variation */
+.beat-cube-red .cube-face {
+    background-color: rgba(255, 51, 85, 0.7);
+    box-shadow: 0 0 10px rgba(255, 51, 85, 0.5);
+}
+
+/* Sword slash effect */
+.slash {
+    position: absolute;
+    width: 100%;
+    height: 5px;
+    background: linear-gradient(90deg, transparent, white, transparent);
+    animation: slash 2s infinite ease-out;
+    opacity: 0;
+}
+
+@keyframes slash {
+    0% { transform: translateY(25px) rotate(-45deg); opacity: 0; width: 0; }
+    10% { opacity: 0.9; }
+    50% { width: 150%; }
+    100% { transform: translateY(-25px) rotate(-45deg); opacity: 0; width: 150%; }
+}
+
+/* Background grid effect */
+.bs-grid {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: 
+        linear-gradient(to right, rgba(30, 144, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(30, 144, 255, 0.05) 1px, transparent 1px);
+    background-size: 30px 30px;
+    z-index: -1;
+}
+
+input, select, textarea {
+    background-color: rgba(0, 0, 0, 0.3) !important;
+    border: 1px solid rgba(0, 170, 255, 0.3) !important;
+    color: white !important;
+}
+
+input:focus, select:focus, textarea:focus {
+    border-color: var(--bs-light-blue) !important;
+    box-shadow: var(--bs-glow-blue) !important;
+}
+
+/* Card hover effects */
+.panel:hover {
+    transform: translateY(-3px);
+    transition: transform 0.3s ease;
 }
 """
 
@@ -512,6 +790,9 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
     # Check if ffmpeg is installed
     ffmpeg_installed = check_command("ffmpeg", "ffmpeg") or FFMPEG_FOUND
     
+    # Background grid effect
+    gr.HTML('<div class="bs-grid"></div>')
+    
     gr.HTML("""
     <h1 class="main-header">Beat Saber Automatic Mapper</h1>
     <p class="subtitle">Transform your music into epic Beat Saber levels with AI-powered mapping</p>
@@ -522,7 +803,22 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
             with gr.Row():
                 with gr.Column(scale=1):
                     with gr.Group(elem_classes=["panel"]):
-                        gr.HTML("""<h3 style="margin-top:0; text-align:center;">Upload Your Music</h3>""")
+                        gr.HTML("""
+                        <h3 style="margin-top:0; text-align:center; color: #00aaff; text-shadow: 0 0 5px rgba(0, 170, 255, 0.5);">
+                            Upload Your Music
+                        </h3>
+                        
+                        <!-- Beat Saber cube -->
+                        <div class="beat-cube">
+                            <div class="cube-face face-front"></div>
+                            <div class="cube-face face-back"></div>
+                            <div class="cube-face face-left"></div>
+                            <div class="cube-face face-right"></div>
+                            <div class="cube-face face-top"></div>
+                            <div class="cube-face face-bottom"></div>
+                            <div class="slash"></div>
+                        </div>
+                        """)
                         audio_input = gr.Audio(
                             type="filepath", 
                             label="", 
@@ -530,7 +826,7 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
                         )
                         
                         # Add difficulty selection options with custom styling
-                        gr.HTML("""<h3 style="margin-top:20px; text-align:center;">Select Difficulty Levels</h3>""")
+                        gr.HTML("""<h3 style="margin-top:20px; text-align:center; color: #ff3355; text-shadow: 0 0 5px rgba(255, 51, 85, 0.5);">Select Difficulty Levels</h3>""")
                         with gr.Row():
                             easy_checkbox = gr.Checkbox(value=True, label="Easy", elem_classes=["difficulty-checkbox", "easy-label"])
                             normal_checkbox = gr.Checkbox(value=True, label="Normal", elem_classes=["difficulty-checkbox", "normal-label"])
@@ -564,8 +860,22 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
                 
                 with gr.Column(scale=1):
                     with gr.Group(elem_classes=["panel"]):
-                        gr.HTML("""<h3 style="margin-top:0; text-align:center;">Your Beat Saber Maps</h3>""")
                         gr.HTML("""
+                        <h3 style="margin-top:0; text-align:center; color: #00aaff; text-shadow: 0 0 5px rgba(0, 170, 255, 0.5);">
+                            Your Beat Saber Maps
+                        </h3>
+                        
+                        <!-- Red Beat Saber cube -->
+                        <div class="beat-cube beat-cube-red">
+                            <div class="cube-face face-front"></div>
+                            <div class="cube-face face-back"></div>
+                            <div class="cube-face face-left"></div>
+                            <div class="cube-face face-right"></div>
+                            <div class="cube-face face-top"></div>
+                            <div class="cube-face face-bottom"></div>
+                            <div class="slash"></div>
+                        </div>
+                        
                         <div style="text-align:center; margin-bottom:20px;">
                             <img src="https://i.imgur.com/zTvIZ9c.png" alt="Beat Saber Logo" style="max-width:200px; margin:0 auto;" />
                         </div>
@@ -573,11 +883,11 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
                         audio_output = gr.File(label="Download Your Maps")
                         gr.HTML("""
                         <div style="margin-top:20px; text-align:center;">
-                            <p>Your Beat Saber map will include:</p>
-                            <ul style="text-align:left;">
-                                <li>Custom beat mapping for each difficulty level</li>
-                                <li>Automatically generated cover image</li>
-                                <li>Ready-to-play map files</li>
+                            <p style="color: #cccccc; font-weight: 300; letter-spacing: 0.5px;">Your Beat Saber map will include:</p>
+                            <ul style="text-align:left; color: #cccccc; font-weight: 300;">
+                                <li style="margin-bottom: 8px;"><span style="color: #00aaff; font-weight: bold;">✓</span> Custom beat mapping for each difficulty level</li>
+                                <li style="margin-bottom: 8px;"><span style="color: #00aaff; font-weight: bold;">✓</span> Automatically generated cover image</li>
+                                <li style="margin-bottom: 8px;"><span style="color: #00aaff; font-weight: bold;">✓</span> Ready-to-play map files</li>
                             </ul>
                         </div>
                         """)
@@ -586,7 +896,21 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
             with gr.Row():
                 with gr.Column():
                     with gr.Group(elem_classes=["panel"]):
-                        gr.HTML("""<h3 style="margin-top:0; text-align:center;">Julia Setup</h3>""")
+                        gr.HTML("""
+                        <h3 style="margin-top:0; text-align:center; color: #00aaff; text-shadow: 0 0 5px rgba(0, 170, 255, 0.5);">
+                            Julia Setup
+                        </h3>
+                        
+                        <!-- Beat Saber cube -->
+                        <div class="beat-cube">
+                            <div class="cube-face face-front"></div>
+                            <div class="cube-face face-back"></div>
+                            <div class="cube-face face-left"></div>
+                            <div class="cube-face face-right"></div>
+                            <div class="cube-face face-top"></div>
+                            <div class="cube-face face-bottom"></div>
+                        </div>
+                        """)
                         
                         # Status with conditional styling
                         julia_status_class = "status-message " + (
@@ -612,20 +936,38 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
                 
                 with gr.Column():
                     with gr.Group(elem_classes=["panel"]):
-                        gr.HTML("""<h3 style="margin-top:0; text-align:center;">Environment Status</h3>""")
+                        gr.HTML("""
+                        <h3 style="margin-top:0; text-align:center; color: #ff3355; text-shadow: 0 0 5px rgba(255, 51, 85, 0.5);">
+                            Environment Status
+                        </h3>
+                        
+                        <!-- Red Beat Saber cube -->
+                        <div class="beat-cube beat-cube-red">
+                            <div class="cube-face face-front"></div>
+                            <div class="cube-face face-back"></div>
+                            <div class="cube-face face-left"></div>
+                            <div class="cube-face face-right"></div>
+                            <div class="cube-face face-top"></div>
+                            <div class="cube-face face-bottom"></div>
+                        </div>
+                        """)
                         
                         env_status = gr.HTML(f"""
                         <div style="text-align:center;">
-                            <div style="margin: 10px 0; padding: 10px; border-radius: 5px; 
-                                 background-color: {JULIA_PATH and 'rgba(76, 175, 80, 0.2)' or 'rgba(244, 67, 54, 0.2)'};
-                                 color: {JULIA_PATH and '#4CAF50' or '#F44336'};">
+                            <div style="margin: 10px 0; padding: 15px; border-radius: 8px; 
+                                 background-color: {JULIA_PATH and 'rgba(0, 170, 255, 0.1)' or 'rgba(255, 51, 85, 0.1)'};
+                                 color: {JULIA_PATH and '#00aaff' or '#ff3355'};
+                                 border-left: 3px solid {JULIA_PATH and '#00aaff' or '#ff3355'};
+                                 transition: all 0.3s ease;">
                                 <span style="font-size: 24px;">{JULIA_PATH and '✅' or '❌'}</span>
                                 <strong>Julia:</strong> {JULIA_PATH and 'Installed' or 'Not installed'}
                             </div>
                             
-                            <div style="margin: 10px 0; padding: 10px; border-radius: 5px;
-                                 background-color: {ffmpeg_installed and 'rgba(76, 175, 80, 0.2)' or 'rgba(244, 67, 54, 0.2)'};
-                                 color: {ffmpeg_installed and '#4CAF50' or '#F44336'};">
+                            <div style="margin: 10px 0; padding: 15px; border-radius: 8px;
+                                 background-color: {ffmpeg_installed and 'rgba(0, 170, 255, 0.1)' or 'rgba(255, 51, 85, 0.1)'};
+                                 color: {ffmpeg_installed and '#00aaff' or '#ff3355'};
+                                 border-left: 3px solid {ffmpeg_installed and '#00aaff' or '#ff3355'};
+                                 transition: all 0.3s ease;">
                                 <span style="font-size: 24px;">{ffmpeg_installed and '✅' or '❌'}</span>
                                 <strong>FFmpeg:</strong> {ffmpeg_installed and 'Installed' or 'Not installed'}
                             </div>
@@ -635,44 +977,88 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
         with gr.TabItem("ℹ️ Help"):
             with gr.Group(elem_classes=["panel"]):
                 gr.HTML("""
-                <h3 style="margin-top:0; text-align:center;">Troubleshooting</h3>
+                <h3 style="margin-top:0; text-align:center; color: #00aaff; text-shadow: 0 0 5px rgba(0, 170, 255, 0.5);">
+                    Troubleshooting
+                </h3>
                 
-                <div style="background-color: rgba(33, 150, 243, 0.1); padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                    <h4 style="margin-top:0; color: #2196F3;">Julia Installation Issues</h4>
-                    <p>If Julia installation fails through the app:</p>
-                    <ol>
-                        <li>Download Julia manually from <a href="https://julialang.org/downloads/" target="_blank">https://julialang.org/downloads/</a></li>
-                        <li>Install Julia and make sure it's in your system PATH</li>
-                        <li>Restart this application</li>
+                <div style="display: flex; justify-content: center; margin: 20px 0;">
+                    <div class="beat-cube">
+                        <div class="cube-face face-front"></div>
+                        <div class="cube-face face-back"></div>
+                        <div class="cube-face face-left"></div>
+                        <div class="cube-face face-right"></div>
+                        <div class="cube-face face-top"></div>
+                        <div class="cube-face face-bottom"></div>
+                    </div>
+                    
+                    <div class="beat-cube beat-cube-red" style="margin-left: 30px;">
+                        <div class="cube-face face-front"></div>
+                        <div class="cube-face face-back"></div>
+                        <div class="cube-face face-left"></div>
+                        <div class="cube-face face-right"></div>
+                        <div class="cube-face face-top"></div>
+                        <div class="cube-face face-bottom"></div>
+                    </div>
+                </div>
+                
+                <div style="background-color: rgba(0, 170, 255, 0.05); padding: 20px; border-radius: 8px; margin-bottom: 20px; 
+                         border-left: 3px solid #00aaff; transition: all 0.3s ease;">
+                    <h4 style="margin-top:0; color: #00aaff; text-shadow: 0 0 3px rgba(0, 170, 255, 0.3);">Julia Installation Issues</h4>
+                    <p style="color: #cccccc; font-weight: 300;">If Julia installation fails through the app:</p>
+                    <ol style="color: #cccccc; font-weight: 300;">
+                        <li style="margin-bottom: 8px;">Download Julia manually from <a href="https://julialang.org/downloads/" target="_blank" style="color: #00aaff; text-decoration: none; border-bottom: 1px dotted #00aaff;">julialang.org/downloads</a></li>
+                        <li style="margin-bottom: 8px;">Install Julia and make sure it's in your system PATH</li>
+                        <li style="margin-bottom: 8px;">Restart this application</li>
                     </ol>
                 </div>
                 
-                <div style="background-color: rgba(33, 150, 243, 0.1); padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                    <h4 style="margin-top:0; color: #2196F3;">Audio Processing Issues</h4>
-                    <p>If audio file processing fails:</p>
-                    <ul>
-                        <li>Make sure FFmpeg is installed and in your system PATH</li>
-                        <li>Check that your audio file is a valid format (MP3, WAV, FLAC, etc.)</li>
-                        <li>Try a different audio file</li>
+                <div style="background-color: rgba(255, 51, 85, 0.05); padding: 20px; border-radius: 8px; margin-bottom: 20px;
+                         border-left: 3px solid #ff3355; transition: all 0.3s ease;">
+                    <h4 style="margin-top:0; color: #ff3355; text-shadow: 0 0 3px rgba(255, 51, 85, 0.3);">Audio Processing Issues</h4>
+                    <p style="color: #cccccc; font-weight: 300;">If audio file processing fails:</p>
+                    <ul style="color: #cccccc; font-weight: 300;">
+                        <li style="margin-bottom: 8px;">Make sure FFmpeg is installed and in your system PATH</li>
+                        <li style="margin-bottom: 8px;">Check that your audio file is a valid format (MP3, WAV, FLAC, etc.)</li>
+                        <li style="margin-bottom: 8px;">Try a different audio file</li>
                     </ul>
                 </div>
                 
-                <h3 style="text-align:center;">How It Works</h3>
+                <h3 style="text-align:center; color: #00aaff; text-shadow: 0 0 5px rgba(0, 170, 255, 0.5); margin-top: 40px;">
+                    How It Works
+                </h3>
                 
-                <div style="display: flex; justify-content: space-between; flex-wrap: wrap; margin-top: 20px;">
-                    <div style="flex: 1; min-width: 250px; background-color: rgba(33, 150, 243, 0.1); padding: 15px; border-radius: 5px; margin: 10px;">
-                        <h4 style="margin-top:0; color: #2196F3; text-align: center;">1. Analysis</h4>
-                        <p>The app analyzes your audio file to detect beats, rhythm patterns, and energy levels.</p>
+                <div style="display: flex; justify-content: space-between; flex-wrap: wrap; margin-top: 30px;">
+                    <div style="flex: 1; min-width: 250px; background-color: rgba(0, 170, 255, 0.05); padding: 20px; border-radius: 8px; margin: 10px;
+                             border-top: 2px solid #00aaff; transition: all 0.3s ease;"
+                             onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 0 15px rgba(0, 170, 255, 0.3)';"
+                             onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+                        <h4 style="margin-top:0; color: #00aaff; text-shadow: 0 0 3px rgba(0, 170, 255, 0.3); text-align: center;">
+                            1. Analysis
+                        </h4>
+                        <div style="width: 40px; height: 3px; background: linear-gradient(90deg, #00aaff, transparent); margin: 10px auto 15px;"></div>
+                        <p style="color: #cccccc; font-weight: 300;">The app analyzes your audio file to detect beats, rhythm patterns, and energy levels.</p>
                     </div>
                     
-                    <div style="flex: 1; min-width: 250px; background-color: rgba(33, 150, 243, 0.1); padding: 15px; border-radius: 5px; margin: 10px;">
-                        <h4 style="margin-top:0; color: #2196F3; text-align: center;">2. Generation</h4>
-                        <p>Based on the analysis, custom beat maps are created for each selected difficulty level.</p>
+                    <div style="flex: 1; min-width: 250px; background-color: rgba(255, 51, 85, 0.05); padding: 20px; border-radius: 8px; margin: 10px;
+                             border-top: 2px solid #ff3355; transition: all 0.3s ease;"
+                             onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 0 15px rgba(255, 51, 85, 0.3)';" 
+                             onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+                        <h4 style="margin-top:0; color: #ff3355; text-shadow: 0 0 3px rgba(255, 51, 85, 0.3); text-align: center;">
+                            2. Generation
+                        </h4>
+                        <div style="width: 40px; height: 3px; background: linear-gradient(90deg, #ff3355, transparent); margin: 10px auto 15px;"></div>
+                        <p style="color: #cccccc; font-weight: 300;">Based on the analysis, custom beat maps are created for each selected difficulty level.</p>
                     </div>
                     
-                    <div style="flex: 1; min-width: 250px; background-color: rgba(33, 150, 243, 0.1); padding: 15px; border-radius: 5px; margin: 10px;">
-                        <h4 style="margin-top:0; color: #2196F3; text-align: center;">3. Packaging</h4>
-                        <p>The app packages all the maps with a custom cover image into a ready-to-use Beat Saber level.</p>
+                    <div style="flex: 1; min-width: 250px; background-color: rgba(0, 170, 255, 0.05); padding: 20px; border-radius: 8px; margin: 10px;
+                             border-top: 2px solid #00aaff; transition: all 0.3s ease;"
+                             onmouseover="this.style.transform='translateY(-5px)'; this.style.boxShadow='0 0 15px rgba(0, 170, 255, 0.3)';"
+                             onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';">
+                        <h4 style="margin-top:0; color: #00aaff; text-shadow: 0 0 3px rgba(0, 170, 255, 0.3); text-align: center;">
+                            3. Packaging
+                        </h4>
+                        <div style="width: 40px; height: 3px; background: linear-gradient(90deg, #00aaff, transparent); margin: 10px auto 15px;"></div>
+                        <p style="color: #cccccc; font-weight: 300;">The app packages all the maps with a custom cover image into a ready-to-use Beat Saber level.</p>
                     </div>
                 </div>
                 """)
@@ -703,8 +1089,8 @@ with gr.Blocks(title="Beat Saber Automatic Mapper", theme=beat_saber_theme, css=
         if not difficulties:
             difficulties = ["Easy", "Normal", "Hard", "Expert", "ExpertPlus"]
         
-        # Convert difficulties to command-line argument
-        difficulties_arg = ",".join(difficulties)
+        # Convert difficulties to command-line argument - one per line for easier parsing in Julia
+        difficulties_arg = "\n".join(difficulties)
         
         # Call the original process_audio_file function with the difficulties
         return process_audio_file(audio_file, difficulties_arg, progress)
