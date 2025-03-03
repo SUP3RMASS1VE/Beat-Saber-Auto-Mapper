@@ -17,7 +17,7 @@ This project provides an automatic Beat Saber map generator that converts audio 
 ## Installation
 1. Clone this repository:
    ```sh
-   git clone https://github.com/your-repo/beat-saber-mapper.git
+   git clone https://github.com/SUP3RMASS1VE/Beat-Saber-Auto-Mapper.git
    cd beat-saber-mapper
    ```
 2. Install dependencies:
